@@ -1,0 +1,11 @@
+# speedlog — run speed test every hour
+# Add to crontab with: crontab -e
+# Adjust the path and interval as needed
+
+0 * * * * ~/.local/bin/speedlog-collect
+
+# Every 30 minutes:
+# */30 * * * * ~/.local/bin/speedlog-collect
+
+# Every 6 hours:
+# 0 */6 * * * ~/.local/bin/speedlog-collect

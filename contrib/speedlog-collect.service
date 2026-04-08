@@ -1,0 +1,9 @@
+[Unit]
+Description=Speedlog speed test collection
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/speedlog-collect
+Environment=SPEEDLOG_DATA_DIR=%h/.local/share/speedlog

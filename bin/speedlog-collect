@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# speedlog-collect — run a speed test and append results to CSV
+# https://github.com/omarshabab/speedlog
+
+SPEEDLOG_DATA_DIR="${SPEEDLOG_DATA_DIR:-$HOME/.local/share/speedlog}"
+LOG_FILE="$SPEEDLOG_DATA_DIR/speedtest_log.csv"
+ERROR_LOG="$SPEEDLOG_DATA_DIR/speedtest_error.log"
+
+# Detect speedtest binary
+SPEEDTEST_BIN="${SPEEDTEST_BIN:-$(command -v speedtest 2>/dev/null || true)}"
+
+if [[ -z "$SPEEDTEST_BIN" ]]; then
+    echo "[ERROR] speedtest CLI not found. Install from https://www.speedtest.net/apps/cli" >&2
+    exit 1
+fi
+
+# Verify it's the Ookla binary (not sivel/speedtest-cli)
+if ! "$SPEEDTEST_BIN" --version 2>/dev/null | grep -qi "ookla"; then
+    echo "[ERROR] Found '$SPEEDTEST_BIN' but it doesn't appear to be the Ookla Speedtest CLI." >&2
+    echo "        Install the official CLI from https://www.speedtest.net/apps/cli" >&2
+    exit 1
+fi
+
+# Check for jq
+if ! command -v jq &>/dev/null; then
+    echo "[ERROR] jq not found. Install with: brew install jq (macOS) or apt install jq (Linux)" >&2
+    exit 1
+fi
+
+# Ensure data directory exists
+mkdir -p "$SPEEDLOG_DATA_DIR"
+
+# Create CSV header if file doesn't exist
+if [[ ! -f "$LOG_FILE" ]]; then
+    echo "timestamp,ping_ms,download_mbit,upload_mbit,isp,server" > "$LOG_FILE"
+fi
+
+# Run speedtest
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+if RESULT=$("$SPEEDTEST_BIN" --format=json --accept-license --accept-gdpr 2>>"$ERROR_LOG"); then
+    # Parse all fields in a single jq call — output as CSV-ready line
+    CSV_LINE=$(echo "$RESULT" | jq -r '[
+        (.ping.latency * 100 | round / 100),
+        (.download.bandwidth * 8 / 1000000 * 100 | round / 100),
+        (.upload.bandwidth * 8 / 1000000 * 100 | round / 100),
+        .isp,
+        .server.name
+    ] | join(",")')
+
+    echo "$TIMESTAMP,$CSV_LINE" >> "$LOG_FILE"
+
+    # Extract individual values for display
+    IFS=',' read -r PING DOWN UP ISP SERVER <<< "$CSV_LINE"
+    echo "[$TIMESTAMP] Ping: ${PING}ms | Down: ${DOWN} Mbps | Up: ${UP} Mbps | ISP: $ISP | Server: $SERVER"
+else
+    echo "$TIMESTAMP,ERROR,ERROR,ERROR,ERROR,ERROR" >> "$LOG_FILE"
+    echo "[$TIMESTAMP] Speedtest failed" | tee -a "$ERROR_LOG" >&2
+    exit 1
+fi

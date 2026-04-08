@@ -1,0 +1,16 @@
+[Unit]
+Description=Speedlog web dashboard
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/speedlog
+ExecStart=/usr/bin/env uv run speedlog-dashboard
+Environment=SPEEDLOG_DATA_DIR=%h/.local/share/speedlog
+Environment=SPEEDLOG_HOST=127.0.0.1
+Environment=SPEEDLOG_PORT=8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
