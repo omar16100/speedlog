@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # speedlog-collect — run a speed test and append results to CSV
-# https://github.com/omarshabab/speedlog
+# https://github.com/omar16100/speedlog
 
 SPEEDLOG_DATA_DIR="${SPEEDLOG_DATA_DIR:-$HOME/.local/share/speedlog}"
 LOG_FILE="$SPEEDLOG_DATA_DIR/speedtest_log.csv"

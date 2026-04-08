@@ -35,7 +35,7 @@ See [c4model.md](c4model.md) for detailed architecture diagrams.
 ### Install (one-liner)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/omarshabab/speedlog/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/omar16100/speedlog/main/install.sh | bash
 ```
 
 This clones the repo to `~/.local/share/speedlog/repo`, installs `speedlog-collect` to `~/.local/bin/`, creates the data directory, and installs dashboard dependencies.

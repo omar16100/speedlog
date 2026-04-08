@@ -22,7 +22,7 @@ Runs periodic speed tests via the [Ookla Speedtest CLI](https://www.speedtest.ne
 
 ```bash
 # One-liner install
-curl -fsSL https://raw.githubusercontent.com/omarshabab/speedlog/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/omar16100/speedlog/main/install.sh | bash
 ```
 
 This clones the repo, checks dependencies, installs `speedlog-collect` to `~/.local/bin/`, and sets up the data directory.

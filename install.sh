@@ -12,7 +12,7 @@ NC='\033[0m'
 SPEEDLOG_DATA_DIR="${SPEEDLOG_DATA_DIR:-$HOME/.local/share/speedlog}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 REPO_DIR="${SPEEDLOG_REPO_DIR:-$HOME/.local/share/speedlog/repo}"
-REPO_URL="https://github.com/omarshabab/speedlog.git"
+REPO_URL="https://github.com/omar16100/speedlog.git"
 
 echo "================================"
 echo "  speedlog installer"
