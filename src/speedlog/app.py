@@ -1,11 +1,14 @@
 """Speedlog dashboard — FastAPI backend serving CSV data and static HTML."""
 
+import asyncio
 import csv
 import logging
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -13,12 +16,26 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+BUNDLED_COLLECT_SCRIPT = Path(__file__).parent.parent.parent / "bin" / "speedlog-collect"
+RUN_TEST_TIMEOUT_SECONDS = 120
 
 app = FastAPI(
     title="Speedlog Dashboard",
     root_path=os.environ.get("SPEEDLOG_ROOT_PATH", "/"),
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+_run_test_lock = asyncio.Lock()
+
+
+def _resolve_collect_script() -> Path:
+    """Locate speedlog-collect: PATH first, then bundled dev copy."""
+    found = shutil.which("speedlog-collect")
+    if found:
+        return Path(found)
+    if BUNDLED_COLLECT_SCRIPT.exists():
+        return BUNDLED_COLLECT_SCRIPT
+    raise FileNotFoundError("speedlog-collect not found on PATH or bundled location")
 
 
 def _csv_path() -> Path:
@@ -120,6 +137,69 @@ async def get_data():
             stats["servers"][s] = stats["servers"].get(s, 0) + 1
 
     return {"records": records, "stats": stats}
+
+
+def _read_last_record() -> dict | None:
+    csv_path = _csv_path()
+    if not csv_path.exists():
+        return None
+    with open(csv_path, newline="") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+        last = None
+        for row in reader:
+            parsed = _parse_row(row)
+            if parsed:
+                last = parsed
+    return last
+
+
+@app.post("/api/run-test")
+async def run_test():
+    """Trigger speedlog-collect on demand and return the resulting CSV row."""
+    if _run_test_lock.locked():
+        logger.info("on-demand test rejected: another test in progress")
+        raise HTTPException(status_code=409, detail={"error": "test already in progress"})
+
+    async with _run_test_lock:
+        try:
+            script_path = _resolve_collect_script()
+        except FileNotFoundError as e:
+            logger.error("speedlog-collect not found: %s", e)
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "speedlog-collect not found",
+                    "hint": "install speedlog (uv pip install -e .) or place script on PATH",
+                },
+            )
+
+        logger.info("Running on-demand speedtest via %s", script_path)
+
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=RUN_TEST_TIMEOUT_SECONDS,
+                env=os.environ.copy(),
+            )
+        except subprocess.TimeoutExpired:
+            logger.error("on-demand speedtest timed out after %ds", RUN_TEST_TIMEOUT_SECONDS)
+            raise HTTPException(status_code=504, detail={"error": "speedtest timed out"})
+
+        if result.returncode != 0:
+            stderr_tail = (result.stderr or "")[-500:]
+            logger.error("on-demand speedtest failed (rc=%d): %s", result.returncode, stderr_tail)
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "speedtest failed", "stderr": stderr_tail},
+            )
+
+        record = _read_last_record()
+        logger.info("on-demand test ok: %s", result.stdout.strip())
+        return {"status": "ok", "record": record, "stdout": result.stdout.strip()}
 
 
 def main():

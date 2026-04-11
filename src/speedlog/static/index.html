@@ -141,6 +141,39 @@
     color: var(--text-muted);
   }
 
+  .run-test-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: transparent;
+    border: 1px solid var(--accent-cyan);
+    border-radius: 3px;
+    color: var(--accent-cyan);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: all 150ms ease;
+  }
+  .run-test-btn:hover:not(:disabled) {
+    background: rgba(0, 229, 255, 0.08);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.35);
+  }
+  .run-test-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .run-test-btn.running {
+    animation: pulse-dot 1.4s ease-in-out infinite;
+  }
+  .run-test-btn.failed {
+    border-color: var(--accent-red);
+    color: var(--accent-red);
+  }
+  .run-test-icon { font-size: 9px; }
+
   /* Error banner */
   .error-banner {
     display: none;
@@ -461,6 +494,10 @@
           <div class="status-dot" id="statusDot"></div>
           <div class="status-label" id="statusLabel">ONLINE</div>
         </div>
+        <button id="runTestBtn" class="run-test-btn" type="button">
+          <span class="run-test-icon">&#9654;</span>
+          <span class="run-test-label">RUN TEST</span>
+        </button>
         <div class="last-update" id="lastUpdate"></div>
       </div>
     </div>
@@ -805,6 +842,44 @@ loadDashboard();
 
 // Auto-refresh every 5 minutes
 setInterval(loadDashboard, 5 * 60 * 1000);
+
+// Run-test button
+const runTestBtn = document.getElementById('runTestBtn');
+const runTestLabel = runTestBtn.querySelector('.run-test-label');
+runTestBtn.addEventListener('click', async () => {
+  if (runTestBtn.disabled) return;
+  runTestBtn.disabled = true;
+  runTestBtn.classList.remove('failed');
+  runTestBtn.classList.add('running');
+  runTestLabel.textContent = 'RUNNING\u2026';
+  let resetDelayMs = 2500;
+  try {
+    const base = window.location.pathname.replace(/\/$/, '');
+    const res = await fetch(base + '/api/run-test', { method: 'POST' });
+    if (res.status === 409) {
+      runTestLabel.textContent = 'IN PROGRESS';
+    } else if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const detail = body.detail || body;
+      throw new Error(detail.error || `HTTP ${res.status}`);
+    } else {
+      await loadDashboard();
+      runTestLabel.textContent = 'DONE';
+    }
+  } catch (err) {
+    console.error('Run test failed:', err);
+    runTestBtn.classList.add('failed');
+    runTestLabel.textContent = 'FAILED';
+    resetDelayMs = 4000;
+  } finally {
+    runTestBtn.classList.remove('running');
+    setTimeout(() => {
+      runTestBtn.disabled = false;
+      runTestBtn.classList.remove('failed');
+      runTestLabel.textContent = 'RUN TEST';
+    }, resetDelayMs);
+  }
+});
 </script>
 </body>
 </html>

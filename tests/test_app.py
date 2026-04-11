@@ -1,5 +1,9 @@
+import subprocess
+
+import pytest
 from fastapi.testclient import TestClient
 
+from speedlog import app as app_module
 from speedlog.app import app
 
 
@@ -79,3 +83,94 @@ def test_api_old_format_compat(csv_with_old_format):
     assert record["ping_ms"] == 7.0
     assert record["isp"] == ""
     assert record["server"] == ""
+
+
+# --- /api/run-test ---
+
+
+def _patch_resolve(monkeypatch, path="/fake/speedlog-collect"):
+    from pathlib import Path
+
+    monkeypatch.setattr(app_module, "_resolve_collect_script", lambda: Path(path))
+
+
+def test_run_test_success(tmp_data_dir, monkeypatch):
+    csv_path = tmp_data_dir / "speedtest_log.csv"
+    csv_path.write_text("timestamp,ping_ms,download_mbit,upload_mbit,isp,server\n")
+
+    def fake_run(cmd, **kwargs):
+        with open(csv_path, "a") as f:
+            f.write("2026-04-11 14:00:00,4.2,310.5,55.1,TM Net,Server X\n")
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok line", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _patch_resolve(monkeypatch)
+
+    client = TestClient(app)
+    response = client.post("/api/run-test")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["record"]["download_mbit"] == 310.5
+    assert body["record"]["server"] == "Server X"
+    assert body["record"]["is_error"] is False
+
+
+def test_run_test_failure(tmp_data_dir, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="speedtest exploded")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _patch_resolve(monkeypatch)
+
+    client = TestClient(app)
+    response = client.post("/api/run-test")
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail["error"] == "speedtest failed"
+    assert "exploded" in detail["stderr"]
+
+
+def test_run_test_timeout(tmp_data_dir, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=120)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _patch_resolve(monkeypatch)
+
+    client = TestClient(app)
+    response = client.post("/api/run-test")
+    assert response.status_code == 504
+    assert response.json()["detail"]["error"] == "speedtest timed out"
+
+
+def test_run_test_concurrent_returns_409(tmp_data_dir, monkeypatch):
+    _patch_resolve(monkeypatch)
+
+    async def acquire_and_check():
+        await app_module._run_test_lock.acquire()
+        try:
+            client = TestClient(app)
+            response = client.post("/api/run-test")
+            assert response.status_code == 409
+            assert response.json()["detail"]["error"] == "test already in progress"
+        finally:
+            app_module._run_test_lock.release()
+
+    import asyncio
+
+    asyncio.new_event_loop().run_until_complete(acquire_and_check())
+
+
+def test_run_test_script_not_found(tmp_data_dir, monkeypatch):
+    def raise_missing():
+        raise FileNotFoundError("nope")
+
+    monkeypatch.setattr(app_module, "_resolve_collect_script", raise_missing)
+
+    client = TestClient(app)
+    response = client.post("/api/run-test")
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail["error"] == "speedlog-collect not found"
+    assert "hint" in detail
