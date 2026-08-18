@@ -3,10 +3,29 @@ set -euo pipefail
 
 # speedlog-collect — run a speed test and append results to CSV
 # https://github.com/omar16100/speedlog
+#
+# CSV schema (8 columns):
+#   timestamp,ping_ms,download_mbit,upload_mbit,isp,server,status,server_id
+#
+# `status` distinguishes a failing connection from a failing measurement tool.
+# Without it every non-zero exit looks like an outage, which badly overstates
+# the error rate: most failures are Ookla's own config and server-selection
+# endpoints, not the line under test.
 
 SPEEDLOG_DATA_DIR="${SPEEDLOG_DATA_DIR:-$HOME/.local/share/speedlog}"
 LOG_FILE="$SPEEDLOG_DATA_DIR/speedtest_log.csv"
 ERROR_LOG="$SPEEDLOG_DATA_DIR/speedtest_error.log"
+
+# Pin a server to keep the series comparable with itself. Ookla's automatic
+# choice moves between endpoints whose medians differ by more than 10 Mbit,
+# which shows up as line variance that is really measurement variance.
+SPEEDLOG_SERVER_ID="${SPEEDLOG_SERVER_ID:-}"
+
+# Most failures are transient and clear within a minute. Overridable so the
+# tests do not have to sit through the real delay.
+SPEEDLOG_RETRY_DELAY="${SPEEDLOG_RETRY_DELAY:-60}"
+
+CSV_HEADER="timestamp,ping_ms,download_mbit,upload_mbit,isp,server,status,server_id"
 
 # Detect speedtest binary
 SPEEDTEST_BIN="${SPEEDTEST_BIN:-$(command -v speedtest 2>/dev/null || true)}"
@@ -34,29 +53,82 @@ mkdir -p "$SPEEDLOG_DATA_DIR"
 
 # Create CSV header if file doesn't exist
 if [[ ! -f "$LOG_FILE" ]]; then
-    echo "timestamp,ping_ms,download_mbit,upload_mbit,isp,server" > "$LOG_FILE"
+    echo "$CSV_HEADER" > "$LOG_FILE"
 fi
 
-# Run speedtest
+# Map Ookla's error text onto a stable class. The CLI emits both bare bracket
+# lines and structured JSON log lines; both carry the same phrases.
+classify_error() {
+    local text="$1"
+    if [[ "$text" == *"Could not retrieve or read configuration"* ]] \
+        || [[ "$text" == *"Cannot retrieve configuration document"* ]] \
+        || [[ "$text" == *"ConfigurationError"* ]]; then
+        echo "config_unavailable"
+    elif [[ "$text" == *"Failed to find a working test server"* ]] \
+        || [[ "$text" == *"NoServers"* ]]; then
+        echo "no_servers"
+    elif [[ "$text" == *"Timeout occurred in connect"* ]] \
+        || [[ "$text" == *"Timeout occurred"* ]]; then
+        echo "connect_timeout"
+    else
+        echo "unknown"
+    fi
+}
+
+# One measurement attempt. Stdout is the raw JSON result on success; the
+# attempt's stderr is captured so it can be classified and preserved.
+run_speedtest() {
+    local stderr_file="$1"
+    local -a args=(--format=json --accept-license --accept-gdpr)
+    if [[ -n "$SPEEDLOG_SERVER_ID" ]]; then
+        args+=(--server-id "$SPEEDLOG_SERVER_ID")
+    fi
+    "$SPEEDTEST_BIN" "${args[@]}" 2>"$stderr_file"
+}
+
+STDERR_FILE=$(mktemp)
+trap 'rm -f "$STDERR_FILE"' EXIT
+
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+STATUS="ok"
+RESULT=""
 
-if RESULT=$("$SPEEDTEST_BIN" --format=json --accept-license --accept-gdpr 2>>"$ERROR_LOG"); then
-    # Parse all fields in a single jq call — output as CSV-ready line
-    CSV_LINE=$(echo "$RESULT" | jq -r '[
-        (.ping.latency * 100 | round / 100),
-        (.download.bandwidth * 8 / 1000000 * 100 | round / 100),
-        (.upload.bandwidth * 8 / 1000000 * 100 | round / 100),
-        .isp,
-        .server.name
-    ] | join(",")')
+if ! RESULT=$(run_speedtest "$STDERR_FILE"); then
+    FIRST_ERROR=$(cat "$STDERR_FILE")
+    cat "$STDERR_FILE" >> "$ERROR_LOG"
+    echo "[$TIMESTAMP] attempt 1 failed ($(classify_error "$FIRST_ERROR")), retrying in ${SPEEDLOG_RETRY_DELAY}s" >> "$ERROR_LOG"
 
-    echo "$TIMESTAMP,$CSV_LINE" >> "$LOG_FILE"
+    sleep "$SPEEDLOG_RETRY_DELAY"
 
-    # Extract individual values for display
-    IFS=',' read -r PING DOWN UP ISP SERVER <<< "$CSV_LINE"
-    echo "[$TIMESTAMP] Ping: ${PING}ms | Down: ${DOWN} Mbps | Up: ${UP} Mbps | ISP: $ISP | Server: $SERVER"
-else
-    echo "$TIMESTAMP,ERROR,ERROR,ERROR,ERROR,ERROR" >> "$LOG_FILE"
-    echo "[$TIMESTAMP] Speedtest failed" | tee -a "$ERROR_LOG" >&2
-    exit 1
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    if RESULT=$(run_speedtest "$STDERR_FILE"); then
+        STATUS="ok_retry"
+    else
+        cat "$STDERR_FILE" >> "$ERROR_LOG"
+        STATUS=$(classify_error "$(cat "$STDERR_FILE")")
+        echo "$TIMESTAMP,ERROR,ERROR,ERROR,ERROR,ERROR,$STATUS,$SPEEDLOG_SERVER_ID" >> "$LOG_FILE"
+        echo "[$TIMESTAMP] Speedtest failed after retry: $STATUS" | tee -a "$ERROR_LOG" >&2
+        exit 1
+    fi
 fi
+
+# Parse all fields in a single jq call — output as CSV-ready line.
+# Commas inside isp/server names would corrupt the row, so strip them.
+# The `// ""` guards matter: a partial result with a null isp or server name
+# would abort jq, and under `set -e` the run would die after the measurement
+# was already taken, losing a good sample and recording nothing.
+CSV_LINE=$(echo "$RESULT" | jq -r '[
+    (.ping.latency * 100 | round / 100),
+    (.download.bandwidth * 8 / 1000000 * 100 | round / 100),
+    (.upload.bandwidth * 8 / 1000000 * 100 | round / 100),
+    ((.isp // "") | gsub(","; " ")),
+    ((.server.name // "") | gsub(","; " "))
+] | join(",")')
+
+SERVER_ID=$(echo "$RESULT" | jq -r '.server.id // ""')
+
+echo "$TIMESTAMP,$CSV_LINE,$STATUS,$SERVER_ID" >> "$LOG_FILE"
+
+# Extract individual values for display
+IFS=',' read -r PING DOWN UP ISP SERVER <<< "$CSV_LINE"
+echo "[$TIMESTAMP] Ping: ${PING}ms | Down: ${DOWN} Mbps | Up: ${UP} Mbps | ISP: $ISP | Server: $SERVER ($SERVER_ID) | $STATUS"

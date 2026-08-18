@@ -71,16 +71,77 @@ All configuration is via environment variables with sensible defaults:
 | `SPEEDLOG_HOST` | `127.0.0.1` | Dashboard bind address |
 | `SPEEDLOG_ROOT_PATH` | `/` | FastAPI root_path for reverse proxy setups |
 | `SPEEDTEST_BIN` | auto-detected | Override path to the Ookla speedtest binary |
+| `SPEEDLOG_SERVER_ID` | unset (auto-select) | Pin a specific Ookla server id, passed as `--server-id` |
+| `SPEEDLOG_RETRY_DELAY` | `60` | Seconds to wait before the single retry |
+| `SPEEDLOG_STALE_HOURS` | `3` | Heartbeat alerts once the newest sample is older than this |
+| `SPEEDLOG_ALERT_CMD` | unset | Command receiving the heartbeat alert on stdin |
+
+### Why pin a server
+
+Ookla's automatic server selection moves between endpoints, and their medians
+differ. Across 2,719 samples on one line the median by server ranged from
+307.62 Mbit to 321.04 Mbit. That 13 Mbit spread is measurement variance, not
+line variance, and it makes a long series incomparable with itself. Pin
+`SPEEDLOG_SERVER_ID` if you care about trends rather than snapshots.
 
 ## CSV Format
 
 ```csv
-timestamp,ping_ms,download_mbit,upload_mbit,isp,server
-2026-04-07 10:00:00,5.0,300.0,50.0,TM Net,Server A
-2026-04-07 11:00:00,ERROR,ERROR,ERROR,ERROR,ERROR
+timestamp,ping_ms,download_mbit,upload_mbit,isp,server,status,server_id
+2026-08-18 10:00:00,5.5,307.9,52.4,TM Net,Server A,ok,45610
+2026-08-18 11:00:00,5.6,308.1,52.3,TM Net,Server A,ok_retry,45610
+2026-08-18 12:00:00,ERROR,ERROR,ERROR,ERROR,ERROR,config_unavailable,45610
 ```
 
-Failed tests are logged as ERROR rows. The dashboard handles both gracefully.
+### The `status` column
+
+A failing speed test usually means the *tool* failed, not the connection. On
+one 136-day sample, 12.5% of runs recorded an error and effectively all of
+them were Ookla's own endpoints refusing service, not the ISP dropping. Errors
+peaked at 39.2% at 00:00 local (16:00 UTC) against a 5-13% baseline, and no
+real outage respects a clock that precisely.
+
+Without a cause recorded, that distinction is unrecoverable after the fact.
+`status` records it at write time:
+
+| Status | Meaning |
+|---|---|
+| `ok` | Test succeeded on the first attempt |
+| `ok_retry` | First attempt failed, the retry succeeded |
+| `config_unavailable` | Ookla's configuration endpoint refused (503 etc) |
+| `no_servers` | Ookla found no working test server |
+| `connect_timeout` | Connection to the test server timed out |
+| `unknown` | Failure that matched no known class, or a legacy row predating this column |
+
+Only `ok` and `ok_retry` are successes. Everything else is a failed
+measurement, and none of them is direct evidence about your connection.
+
+### Legacy formats
+
+4-column (pre-ISP), 6-column (pre-status) and 8-column rows all parse. Legacy
+successes report `status=ok`; legacy failures report `unknown` rather than a
+cause that was never recorded.
+
+## Heartbeat
+
+A monitor that only alerts on bad numbers cannot alert on *no* numbers. In the
+same 136-day sample, 175 consecutive hours went missing without anyone
+noticing, and the dashboard itself sat dead for six weeks.
+
+```bash
+speedlog-heartbeat   # exit 0 if fresh, exit 1 and alert if stale
+```
+
+Schedule it separately from the collector, so a wedged collector cannot
+silence its own alarm:
+
+```bash
+23 */3 * * * SPEEDLOG_ALERT_CMD="..." ~/.local/bin/speedlog-heartbeat
+```
+
+`SPEEDLOG_ALERT_CMD` receives the message on stdin. Anything that reads stdin
+works, for example a Telegram or ntfy sender. Leave it unset to report to
+stderr only, which cron will mail.
 
 ## Reverse Proxy
 

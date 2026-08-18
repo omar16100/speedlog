@@ -44,8 +44,13 @@ def _csv_path() -> Path:
     return data_dir / "speedtest_log.csv"
 
 
+# Every status the collector can write, plus "unknown" for the legacy rows
+# that predate the column. Anything not "ok"/"ok_retry" is a failure.
+TOOL_ERROR_STATUSES = {"config_unavailable", "no_servers", "connect_timeout", "unknown"}
+
+
 def _parse_row(row: list[str]) -> dict | None:
-    """Parse a CSV row, handling both 4-col and 6-col formats. Returns None for short rows."""
+    """Parse a CSV row, handling the 4-col, 6-col and 8-col formats. Returns None for short rows."""
     if len(row) < 4:
         return None
 
@@ -55,8 +60,16 @@ def _parse_row(row: list[str]) -> dict | None:
     upload = row[3]
     isp = row[4] if len(row) > 4 else ""
     server = row[5] if len(row) > 5 else ""
+    server_id = row[7] if len(row) > 7 else ""
 
     is_error = ping == "ERROR"
+
+    # Rows written before the status column carry no classification. Treat a
+    # legacy failure as "unknown" rather than inventing a cause for it.
+    if len(row) > 6 and row[6]:
+        status = row[6]
+    else:
+        status = "unknown" if is_error else "ok"
 
     return {
         "timestamp": timestamp,
@@ -65,6 +78,8 @@ def _parse_row(row: list[str]) -> dict | None:
         "upload_mbit": None if is_error else float(upload),
         "isp": isp,
         "server": server,
+        "server_id": server_id,
+        "status": status,
         "is_error": is_error,
     }
 
@@ -130,7 +145,21 @@ async def get_data():
             },
             "servers": {},
             "isp": valid[-1]["isp"] if valid[-1]["isp"] else "Unknown",
+            # Failures broken out by cause. A raw error rate conflates "the
+            # line was down" with "Ookla would not answer", and in practice
+            # the second dominates.
+            "status_counts": {},
+            "tool_error_count": sum(
+                1 for r in records if r["status"] in TOOL_ERROR_STATUSES
+            ),
+            "retry_recovered_count": sum(
+                1 for r in records if r["status"] == "ok_retry"
+            ),
         }
+
+        for r in records:
+            st = r["status"] or "unknown"
+            stats["status_counts"][st] = stats["status_counts"].get(st, 0) + 1
 
         for r in valid:
             s = r["server"] or "Unknown"
