@@ -13,9 +13,28 @@ Analysed 136 days / 3,109 rows of live data and fixed what it exposed. Branch `f
 - Commas in ISP/server names are now stripped, so a name like "Test, Server" can no longer corrupt row width.
 - 28 tests pass in 0.16s.
 
+### Kimi review round (18 Aug 2026)
+
+Adversarial review by kimi found 13 issues; 10 fixed, 3 accepted as-is.
+
+- **Silent loss of a completed measurement.** jq was unguarded, so malformed JSON or a null `.ping.latency` (jq raises on `null * 100`) killed the run under `set -e` with no CSV row and no error-log entry. The same failure class this PR exists to remove, moved one stage down the pipe. Now recorded as `parse_error` with the raw result preserved.
+- **The new metric re-created the original bug.** `TOOL_ERROR_STATUSES` included `"unknown"`, so all 389 legacy failures were counted as confirmed tool errors: asserting a cause that was never recorded. Split into `tool_error_count` (0) and `unclassified_error_count` (389). This also forced a correction to the blog draft's central claim.
+- **`_parse_row` crashed the whole API on one bad row.** Any non-numeric, non-`ERROR` value raised `ValueError`, 500-ing `/api/data` entirely. Now treated as a failed row.
+- **`RUN_TEST_TIMEOUT_SECONDS = 120` was shorter than the collector's retry worst case**, so the API path could never complete a retry and SIGKILLed mid-measurement, leaking the temp file. Raised to 300 with the arithmetic documented.
+- **No mutual exclusion between cron and `POST /api/run-test`.** Two concurrent speed tests saturate the line against each other and both rows land marked `ok` carrying meaningless numbers. Added a mkdir-based lock (macOS has no `flock(1)`) with 30-minute stale reaping.
+- **Malformed `SPEEDLOG_STALE_HOURS` killed the heartbeat before `alert()` was reachable**, i.e. the alarm failed silently, the precise failure it exists to catch. Validated up front.
+- **False "delivery failed" via SIGPIPE** when an alert sender exits without draining stdin. Switched the pipe to a here-string.
+- Also: numeric validation of `SPEEDLOG_SERVER_ID` (a comma would widen the row), a header-mismatch warning, and `printf` instead of `echo` when feeding jq.
+
+Rejected one suggested fix: defaulting missing measurements to `0` via `// 0`. A fabricated 0 ms ping is indistinguishable from a real one once written and would drag every average that reads the column. Failing loudly as `parse_error` is correct.
+
+Accepted without change: the `409` TOCTOU in `run-test` (harmless, semantics are "queued"), the timestamp being measurement-start, and the collector's bash logic having no test coverage.
+
+34 tests pass.
+
 ### Not done
-- **Codex review skipped**: usage limit hit, resets 20 Aug 2026. Self-reviewed instead. Re-run before merging the PR.
-- Cron cutover from `/Users/macmini/scripts/speedtest_monitor.sh` to `speedlog-collect` still pending: `crontab` writes are blocked from an automation shell on this Mac, needs a Full Disk Access terminal.
+- **Codex review skipped**: usage limit hit, resets 20 Aug 2026. Kimi reviewed instead and found 4 high-severity defects that self-review had missed. Codex still worth running when credits return.
+- Cron cutover DONE by a different route: `crontab` writes are blocked from an automation shell (the cron spool needs Full Disk Access, and `TMPDIR=/tmp` does not help), so `/Users/macmini/scripts/speedtest_monitor.sh` was rewritten as a thin wrapper that `exec`s `speedlog-collect`. The untouched `0 * * * *` line now runs the new code, sleeping 420s to land at `:07`.
 - `com.speedlog.dashboard` LaunchAgent still not loaded; dashboard currently running from a manual `nohup`.
 
 ## 2026-04-11

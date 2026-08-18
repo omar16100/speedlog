@@ -95,11 +95,16 @@ timestamp,ping_ms,download_mbit,upload_mbit,isp,server,status,server_id
 
 ### The `status` column
 
-A failing speed test usually means the *tool* failed, not the connection. On
-one 136-day sample, 12.5% of runs recorded an error and effectively all of
-them were Ookla's own endpoints refusing service, not the ISP dropping. Errors
-peaked at 39.2% at 00:00 local (16:00 UTC) against a 5-13% baseline, and no
-real outage respects a clock that precisely.
+A failing speed test often means the *tool* failed, not the connection. On one
+136-day sample, 12.5% of runs recorded an error. Every error message in the
+log was Ookla-side (configuration 503s, `NoServers`, connect timeouts) and
+none indicated a local link failure, and errors peaked at 39.2% at 00:00 local
+(16:00 UTC) against a 5-13% baseline, which no real outage would do.
+
+That is strong evidence, but note what it is not: because the old collector
+recorded no cause per row, not one of those 389 failures can be attributed
+individually, even now. That is the whole argument for recording the cause at
+write time rather than reconstructing it later.
 
 Without a cause recorded, that distinction is unrecoverable after the fact.
 `status` records it at write time:
@@ -111,10 +116,27 @@ Without a cause recorded, that distinction is unrecoverable after the fact.
 | `config_unavailable` | Ookla's configuration endpoint refused (503 etc) |
 | `no_servers` | Ookla found no working test server |
 | `connect_timeout` | Connection to the test server timed out |
+| `parse_error` | The test completed but its output could not be parsed. The raw result is written to the error log. |
 | `unknown` | Failure that matched no known class, or a legacy row predating this column |
 
 Only `ok` and `ok_retry` are successes. Everything else is a failed
 measurement, and none of them is direct evidence about your connection.
+
+`unknown` is reported separately from the classified failures, and is
+deliberately **not** counted as a tool error. Rows written before this column
+existed all parse as `unknown`, and counting them as tool failures would
+assert a cause that was never recorded, which is the same misattribution the
+column exists to prevent. The API exposes `tool_error_count` (positively
+identified) and `unclassified_error_count` (cause unknown) separately.
+
+### Concurrency
+
+Only one measurement runs at a time. The collector takes an exclusive lock
+(`$SPEEDLOG_DATA_DIR/.collect.lock`, mkdir-based since macOS has no
+`flock(1)`) and exits rather than queueing if another run holds it. Two speed
+tests running together saturate the link against each other, and both rows
+would be written marked `ok` while carrying meaningless bandwidth. A lock
+older than 30 minutes is treated as stale and reaped.
 
 ### Legacy formats
 
@@ -195,4 +217,6 @@ If you have an existing `speedtest_log.csv`, copy it to the data directory:
 cp /path/to/old/speedtest_log.csv ~/.local/share/speedlog/speedtest_log.csv
 ```
 
-The dashboard handles both 4-column (old) and 6-column (new, with ISP and server) formats automatically.
+The dashboard handles 4-column (original), 6-column (with ISP and server) and 8-column (with status and server id) formats automatically, including a file that mixes all three.
+
+If your existing header does not match the current 8-column schema, the collector warns rather than rewriting it: the header is your data, not the tool's. Fix it by hand when convenient.

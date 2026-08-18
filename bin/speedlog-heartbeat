@@ -24,13 +24,25 @@ alert() {
     local message="$1"
     echo "$message" >&2
     if [[ -n "$SPEEDLOG_ALERT_CMD" ]]; then
-        if printf '%s\n' "$message" | eval "$SPEEDLOG_ALERT_CMD"; then
+        # A here-string, not a pipe: a sender that exits without draining
+        # stdin would kill `printf` with SIGPIPE, and `pipefail` would then
+        # report a delivery failure for an alert that was actually delivered.
+        if eval "$SPEEDLOG_ALERT_CMD" <<< "$message"; then
             echo "[heartbeat] alert delivered"
         else
             echo "[heartbeat] ALERT DELIVERY FAILED" >&2
         fi
     fi
 }
+
+# Validate before any arithmetic. `$(( ))` on a non-integer is a fatal shell
+# error under `set -e`, and it would fire BEFORE alert() is ever reached: the
+# alarm would die quietly, which is the precise failure this script exists to
+# catch.
+if [[ ! "$SPEEDLOG_STALE_HOURS" =~ ^[0-9]+$ ]]; then
+    alert "speedlog: SPEEDLOG_STALE_HOURS must be a whole number, got '$SPEEDLOG_STALE_HOURS'. Not checking freshness."
+    exit 1
+fi
 
 if [[ ! -f "$LOG_FILE" ]]; then
     alert "speedlog: no CSV at $LOG_FILE — the collector has never run."

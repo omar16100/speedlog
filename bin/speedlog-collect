@@ -48,12 +48,47 @@ if ! command -v jq &>/dev/null; then
     exit 1
 fi
 
+# A server id ends up interpolated into the CSV; a comma in it would widen the
+# row and silently corrupt the schema.
+if [[ -n "$SPEEDLOG_SERVER_ID" && ! "$SPEEDLOG_SERVER_ID" =~ ^[0-9]+$ ]]; then
+    echo "[ERROR] SPEEDLOG_SERVER_ID must be numeric, got '$SPEEDLOG_SERVER_ID'" >&2
+    exit 1
+fi
+
 # Ensure data directory exists
 mkdir -p "$SPEEDLOG_DATA_DIR"
 
 # Create CSV header if file doesn't exist
 if [[ ! -f "$LOG_FILE" ]]; then
     echo "$CSV_HEADER" > "$LOG_FILE"
+else
+    # Appending 8-column rows under an older header makes a mixed-schema file
+    # that reads fine here and lies to every other tool. Warn rather than
+    # rewrite: the header is the user's data, not ours.
+    EXISTING_HEADER=$(head -1 "$LOG_FILE")
+    if [[ "$EXISTING_HEADER" != "$CSV_HEADER" ]]; then
+        echo "[WARN] $LOG_FILE header is '$EXISTING_HEADER'," >&2
+        echo "       expected '$CSV_HEADER'. Appending anyway; fix the header to avoid a mixed-schema file." >&2
+    fi
+fi
+
+# Only one measurement at a time. The hourly cron job and the dashboard's
+# on-demand POST /api/run-test both invoke this script, and two speed tests
+# running together saturate the line against each other: both rows land marked
+# `ok` carrying meaningless bandwidth. macOS has no flock(1), so use mkdir,
+# which is atomic on every POSIX filesystem.
+LOCK_DIR="$SPEEDLOG_DATA_DIR/.collect.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    # A crash can leave the directory behind. Reap it if it is clearly stale,
+    # otherwise defer to the run that holds it.
+    if [[ -n $(find "$LOCK_DIR" -maxdepth 0 -mmin +30 2>/dev/null) ]]; then
+        echo "[WARN] removing stale lock $LOCK_DIR (older than 30 min)" >&2
+        rm -rf "$LOCK_DIR"
+        mkdir "$LOCK_DIR" 2>/dev/null || { echo "[ERROR] could not acquire lock" >&2; exit 1; }
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] another speedlog-collect is running, skipping" >&2
+        exit 1
+    fi
 fi
 
 # Map Ookla's error text onto a stable class. The CLI emits both bare bracket
@@ -87,7 +122,7 @@ run_speedtest() {
 }
 
 STDERR_FILE=$(mktemp)
-trap 'rm -f "$STDERR_FILE"' EXIT
+trap 'rm -f "$STDERR_FILE"; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 STATUS="ok"
@@ -114,18 +149,34 @@ fi
 
 # Parse all fields in a single jq call — output as CSV-ready line.
 # Commas inside isp/server names would corrupt the row, so strip them.
-# The `// ""` guards matter: a partial result with a null isp or server name
-# would abort jq, and under `set -e` the run would die after the measurement
-# was already taken, losing a good sample and recording nothing.
-CSV_LINE=$(echo "$RESULT" | jq -r '[
+# Parsing must not be allowed to fail silently. The measurement has already
+# been taken by this point, so an unguarded jq failure under `set -e` would
+# kill the run with no CSV row and nothing in the error log: a completed
+# measurement vanishing without trace, which is the same failure class this
+# script exists to eliminate.
+#
+# The three measurements are deliberately NOT defaulted. jq raises a type
+# error on `null * 100`, so a result missing `.ping.latency` fails here and is
+# recorded as parse_error. Coercing a missing measurement to 0 would be worse
+# than failing: a fabricated 0 ms ping is indistinguishable from a real one
+# once written, and it would drag every average that reads the column.
+#
+# isp and server name are labels rather than measurements, so an empty string
+# for them is honest and keeps the row usable.
+if ! CSV_LINE=$(printf '%s' "$RESULT" | jq -r '[
     (.ping.latency * 100 | round / 100),
     (.download.bandwidth * 8 / 1000000 * 100 | round / 100),
     (.upload.bandwidth * 8 / 1000000 * 100 | round / 100),
     ((.isp // "") | gsub(","; " ")),
     ((.server.name // "") | gsub(","; " "))
-] | join(",")')
+] | join(",")' 2>>"$ERROR_LOG"); then
+    printf '%s\n' "$RESULT" >> "$ERROR_LOG"
+    echo "$TIMESTAMP,ERROR,ERROR,ERROR,ERROR,ERROR,parse_error,$SPEEDLOG_SERVER_ID" >> "$LOG_FILE"
+    echo "[$TIMESTAMP] measurement succeeded but could not be parsed; raw result written to $ERROR_LOG" >&2
+    exit 1
+fi
 
-SERVER_ID=$(echo "$RESULT" | jq -r '.server.id // ""')
+SERVER_ID=$(printf '%s' "$RESULT" | jq -r '.server.id // ""' 2>/dev/null || echo "")
 
 echo "$TIMESTAMP,$CSV_LINE,$STATUS,$SERVER_ID" >> "$LOG_FILE"
 

@@ -1,6 +1,35 @@
 import pytest
 
-from speedlog.app import _parse_row
+from speedlog.app import TOOL_ERROR_STATUSES, _parse_row
+
+
+def test_unknown_is_not_counted_as_a_tool_error():
+    """Legacy rows have no recorded cause, so they must not be attributed to the tool.
+
+    Counting them would recreate the exact misattribution the status column
+    exists to prevent, only with an authoritative-looking number attached.
+    """
+    assert "unknown" not in TOOL_ERROR_STATUSES
+
+
+@pytest.mark.parametrize("bad", ["", "N/A", "null", "-"])
+def test_malformed_numeric_does_not_raise(bad):
+    """One bad row must not take down the whole API response."""
+    row = ["2026-08-18 15:00:00", bad, "300.0", "50.0", "TM Net", "Server A"]
+    result = _parse_row(row)
+    assert result is not None
+    assert result["is_error"] is True
+    assert result["ping_ms"] is None
+
+
+def test_parse_error_status_is_a_tool_error():
+    row = [
+        "2026-08-18 15:00:00", "ERROR", "ERROR", "ERROR",
+        "ERROR", "ERROR", "parse_error", "45610",
+    ]
+    result = _parse_row(row)
+    assert result["status"] == "parse_error"
+    assert result["status"] in TOOL_ERROR_STATUSES
 
 
 def test_valid_8col_row():
