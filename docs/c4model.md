@@ -51,7 +51,7 @@ C4Component
     Container_Boundary(dashboard, "speedlog-dashboard") {
         Component(index_route, "GET /", "FastAPI route", "Serves static index.html")
         Component(api_route, "GET /api/data", "FastAPI route", "Reads CSV, computes stats, returns JSON")
-        Component(parse_row, "_parse_row()", "Python function", "Parses CSV rows, handles 4-col and 6-col formats")
+        Component(parse_row, "_parse_row()", "Python function", "Parses CSV rows, handles 4-col, 6-col and 8-col formats")
         Component(csv_path, "_csv_path()", "Python function", "Resolves data dir from SPEEDLOG_DATA_DIR env var")
         Component(static, "static/index.html", "HTML + JS", "Chart.js dashboard with auto-refresh")
     }
@@ -66,6 +66,29 @@ C4Component
 
 ## Data Flow
 
-1. **Collection**: Cron triggers `speedlog-collect` → runs `speedtest --format=json` → pipes through `jq` → appends row to CSV
-2. **Dashboard**: Browser loads `/` → fetches `/api/data` → FastAPI reads CSV, computes stats (avg/min/max/latest, error rate, server distribution) → returns JSON → Chart.js renders
+1. **Collection**: Cron triggers `speedlog-collect` → runs `speedtest --format=json` → on failure classifies the error and retries once → pipes through `jq` → appends an 8-column row to CSV
+2. **Dashboard**: Browser loads `/` → fetches `/api/data` → FastAPI reads CSV, computes stats (avg/min/max/latest, error rate, status breakdown, server distribution) → returns JSON → Chart.js renders
 3. **Refresh**: Dashboard auto-refreshes every 5 minutes via `setInterval`
+4. **Liveness**: `speedlog-heartbeat` runs on its own schedule, reads only the newest CSV row, and alerts through `SPEEDLOG_ALERT_CMD` when that row goes stale
+
+## Failure Model
+
+Two failures are distinct and the design keeps them apart.
+
+| Failure | Detected by | Recorded as |
+|---|---|---|
+| The connection is bad | Collector, successfully | A row with low numbers and `status=ok` |
+| The measurement tool failed | Collector, on non-zero exit | A row with `ERROR` values and a classified `status` |
+| The collector is not running at all | Heartbeat only | Absence of rows, which the collector cannot report |
+
+The third case is why the heartbeat is a separate process on a separate
+schedule. A collector that has crashed, been unscheduled, or lost its
+interpreter cannot raise an alarm about itself. Historical evidence: 175
+consecutive hours of missing data, and a dashboard down for six weeks behind a
+deleted virtualenv, both unnoticed because nothing watched for silence.
+
+## Change Log
+
+| Date | Change |
+|---|---|
+| 2026-08-18 | CSV schema 6 → 8 columns (`status`, `server_id`). Collector retries once and classifies Ookla errors. Added `speedlog-heartbeat`. Optional `SPEEDLOG_SERVER_ID` pinning. |

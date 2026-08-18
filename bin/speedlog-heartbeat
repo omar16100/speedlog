@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# speedlog-heartbeat — alert when the collector stops producing data.
+# https://github.com/omar16100/speedlog
+#
+# A speed monitor that only alerts on bad numbers cannot alert on no numbers.
+# This checks the opposite condition: the newest row being too old. Run it on
+# its own schedule so a wedged collector cannot silence its own alarm.
+
+SPEEDLOG_DATA_DIR="${SPEEDLOG_DATA_DIR:-$HOME/.local/share/speedlog}"
+LOG_FILE="$SPEEDLOG_DATA_DIR/speedtest_log.csv"
+
+# Alert once the newest sample is older than this. Default gives an hourly
+# collector three chances to land a row before anyone is woken up.
+SPEEDLOG_STALE_HOURS="${SPEEDLOG_STALE_HOURS:-3}"
+
+# Optional alert command reading the message on stdin, e.g.
+#   SPEEDLOG_ALERT_CMD="hermes send --to telegram --quiet"
+# Unset means report to stdout/stderr only, which is what cron mails.
+SPEEDLOG_ALERT_CMD="${SPEEDLOG_ALERT_CMD:-}"
+
+alert() {
+    local message="$1"
+    echo "$message" >&2
+    if [[ -n "$SPEEDLOG_ALERT_CMD" ]]; then
+        # A here-string, not a pipe: a sender that exits without draining
+        # stdin would kill `printf` with SIGPIPE, and `pipefail` would then
+        # report a delivery failure for an alert that was actually delivered.
+        if eval "$SPEEDLOG_ALERT_CMD" <<< "$message"; then
+            echo "[heartbeat] alert delivered"
+        else
+            echo "[heartbeat] ALERT DELIVERY FAILED" >&2
+        fi
+    fi
+}
+
+# Validate before any arithmetic. `$(( ))` on a non-integer is a fatal shell
+# error under `set -e`, and it would fire BEFORE alert() is ever reached: the
+# alarm would die quietly, which is the precise failure this script exists to
+# catch.
+if [[ ! "$SPEEDLOG_STALE_HOURS" =~ ^[0-9]+$ ]]; then
+    alert "speedlog: SPEEDLOG_STALE_HOURS must be a whole number, got '$SPEEDLOG_STALE_HOURS'. Not checking freshness."
+    exit 1
+fi
+
+if [[ ! -f "$LOG_FILE" ]]; then
+    alert "speedlog: no CSV at $LOG_FILE — the collector has never run."
+    exit 1
+fi
+
+# Newest timestamp is the first field of the last non-empty line.
+# `|| true` matters: on a zero-byte CSV grep exits non-zero, and under
+# `set -o pipefail` that would kill the alarm silently — the exact class of
+# failure this script exists to catch.
+LAST_LINE=$(grep -v '^[[:space:]]*$' "$LOG_FILE" | tail -1 || true)
+LAST_TS="${LAST_LINE%%,*}"
+
+if [[ "$LAST_TS" == "timestamp" || -z "$LAST_TS" ]]; then
+    alert "speedlog: $LOG_FILE has no data rows (file is empty or header-only)."
+    exit 1
+fi
+
+# BSD date (macOS) and GNU date disagree on parsing flags; try both.
+if LAST_EPOCH=$(date -j -f '%Y-%m-%d %H:%M:%S' "$LAST_TS" '+%s' 2>/dev/null); then
+    :
+elif LAST_EPOCH=$(date -d "$LAST_TS" '+%s' 2>/dev/null); then
+    :
+else
+    alert "speedlog: could not parse last timestamp '$LAST_TS' in $LOG_FILE."
+    exit 1
+fi
+
+NOW_EPOCH=$(date '+%s')
+AGE_SECONDS=$((NOW_EPOCH - LAST_EPOCH))
+AGE_HOURS=$((AGE_SECONDS / 3600))
+STALE_SECONDS=$((SPEEDLOG_STALE_HOURS * 3600))
+
+if (( AGE_SECONDS > STALE_SECONDS )); then
+    alert "speedlog: STALE. Newest sample is ${AGE_HOURS}h old (${LAST_TS}), threshold ${SPEEDLOG_STALE_HOURS}h. The collector is not running."
+    exit 1
+fi
+
+echo "[heartbeat] ok — newest sample ${AGE_HOURS}h old (${LAST_TS})"

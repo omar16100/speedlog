@@ -17,7 +17,11 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 BUNDLED_COLLECT_SCRIPT = Path(__file__).parent.parent.parent / "bin" / "speedlog-collect"
-RUN_TEST_TIMEOUT_SECONDS = 120
+# Must exceed the collector's worst case: a first attempt that hangs until
+# Ookla's own timeout, plus SPEEDLOG_RETRY_DELAY (60s default), plus a full
+# second measurement. At 120s the retry could never finish, and the SIGKILL
+# that followed would destroy a measurement mid-flight and leak its temp file.
+RUN_TEST_TIMEOUT_SECONDS = 300
 
 app = FastAPI(
     title="Speedlog Dashboard",
@@ -44,8 +48,22 @@ def _csv_path() -> Path:
     return data_dir / "speedtest_log.csv"
 
 
+# Failures we positively identified as the measurement tool's fault.
+#
+# "unknown" is deliberately NOT in this set. Legacy rows written before the
+# status column all parse as "unknown", and counting them here would assert a
+# cause that was never recorded, which is the exact misattribution this column
+# exists to prevent. They are reported separately as unclassified.
+TOOL_ERROR_STATUSES = {
+    "config_unavailable",
+    "no_servers",
+    "connect_timeout",
+    "parse_error",
+}
+
+
 def _parse_row(row: list[str]) -> dict | None:
-    """Parse a CSV row, handling both 4-col and 6-col formats. Returns None for short rows."""
+    """Parse a CSV row, handling the 4-col, 6-col and 8-col formats. Returns None for short rows."""
     if len(row) < 4:
         return None
 
@@ -55,16 +73,36 @@ def _parse_row(row: list[str]) -> dict | None:
     upload = row[3]
     isp = row[4] if len(row) > 4 else ""
     server = row[5] if len(row) > 5 else ""
+    server_id = row[7] if len(row) > 7 else ""
 
-    is_error = ping == "ERROR"
+    # Anything non-numeric is treated as a failed row rather than allowed to
+    # raise. One malformed row would otherwise take down the whole /api/data
+    # response, turning a single bad sample into a dead dashboard.
+    try:
+        ping_val = float(ping)
+        download_val = float(download)
+        upload_val = float(upload)
+        is_error = False
+    except ValueError:
+        ping_val = download_val = upload_val = None
+        is_error = True
+
+    # Rows written before the status column carry no classification. Treat a
+    # legacy failure as "unknown" rather than inventing a cause for it.
+    if len(row) > 6 and row[6]:
+        status = row[6]
+    else:
+        status = "unknown" if is_error else "ok"
 
     return {
         "timestamp": timestamp,
-        "ping_ms": None if is_error else float(ping),
-        "download_mbit": None if is_error else float(download),
-        "upload_mbit": None if is_error else float(upload),
+        "ping_ms": ping_val,
+        "download_mbit": download_val,
+        "upload_mbit": upload_val,
         "isp": isp,
         "server": server,
+        "server_id": server_id,
+        "status": status,
         "is_error": is_error,
     }
 
@@ -130,7 +168,27 @@ async def get_data():
             },
             "servers": {},
             "isp": valid[-1]["isp"] if valid[-1]["isp"] else "Unknown",
+            # Failures broken out by cause. A raw error rate conflates "the
+            # line was down" with "Ookla would not answer", and in practice
+            # the second dominates.
+            "status_counts": {},
+            "tool_error_count": sum(
+                1 for r in records if r["status"] in TOOL_ERROR_STATUSES
+            ),
+            # Failures with no recorded cause: legacy rows, or classes the
+            # collector did not recognise. Reported on their own so nobody
+            # reads them as evidence either way.
+            "unclassified_error_count": sum(
+                1 for r in records if r["is_error"] and r["status"] == "unknown"
+            ),
+            "retry_recovered_count": sum(
+                1 for r in records if r["status"] == "ok_retry"
+            ),
         }
+
+        for r in records:
+            st = r["status"] or "unknown"
+            stats["status_counts"][st] = stats["status_counts"].get(st, 0) + 1
 
         for r in valid:
             s = r["server"] or "Unknown"
