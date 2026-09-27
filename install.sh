@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# speedlog installer — clone, check deps, set up everything
-# Usage: curl -fsSL https://raw.githubusercontent.com/omarshabab/speedlog/main/install.sh | bash
+# speedlog installer: clone, check deps, set up everything
+# Usage: curl -fsSL https://raw.githubusercontent.com/omar16100/speedlog/main/install.sh | bash
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -55,7 +55,7 @@ if command -v speedtest &>/dev/null; then
 else
     echo -e "  ${RED}[missing]${NC} speedtest"
     echo "       Install from https://www.speedtest.net/apps/cli"
-    echo "       macOS: brew install speedtest"
+    echo "       macOS: brew install teamookla/speedtest/speedtest"
     MISSING=1
 fi
 
@@ -114,7 +114,7 @@ if command -v uv &>/dev/null; then
     echo "Installing dashboard dependencies..."
     (cd "$REPO_DIR" && uv sync --quiet 2>/dev/null) && \
         echo -e "  ${GREEN}[ok]${NC} dashboard dependencies installed" || \
-        echo -e "  ${YELLOW}[skip]${NC} uv sync failed — run manually: cd $REPO_DIR && uv sync"
+        echo -e "  ${YELLOW}[skip]${NC} uv sync failed, run manually: cd $REPO_DIR && uv sync"
 fi
 
 echo ""

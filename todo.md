@@ -1,5 +1,18 @@
 # speedlog todo
 
+## 2026-09-27
+
+README accuracy and CI. Branch `fix/readme-accuracy-ci`, plan `docs/27092026_readme_accuracy_ci_plan.md`.
+
+- README tagline and features rewritten to match the code: two bash scripts (`speedlog-collect`, `speedlog-heartbeat`) plus a FastAPI/uvicorn dashboard, not "one bash script, one HTML file". Dropped "simplest", "real-time" (page polls every 5 min) and "zero-config".
+- README config table now lists all env vars read by the scripts and `app.py`; added a note that the dashboard has no auth, so binding to `0.0.0.0` exposes `POST /api/run-test`.
+- Quick Start install steps now match `install.sh` order; noted that it does not install `speedlog-heartbeat` (also in `docs/index.md`).
+- Em dashes removed from README, `docs/index.md` overview, `install.sh` and this file; `install.sh` usage comment pointed at the wrong GitHub owner, fixed.
+- Added `.github/workflows/ci.yml`: checkout v7, setup-uv v10.2.0, Python 3.12, `uv run pytest -v`. No ruff (not configured). `uv.lock` stays gitignored, so CI resolves fresh.
+- Machine-specific absolute paths in this file replaced with `~`.
+- Codex (gpt-6-astra) review: no blocker/major; 4 minors applied (retry wording, failure classes not attributed to Ookla, installer env vars + hardcoded timeouts documented, `brew install speedtest` needs Ookla's tap: `teamookla/speedtest/speedtest`, also fixed in `docs/index.md` and the `install.sh` hint).
+- 34 tests pass locally with the CI command.
+
 ## 2026-08-18
 
 Analysed 136 days / 3,109 rows of live data and fixed what it exposed. Branch `fix/collector-error-classification`.
@@ -34,18 +47,24 @@ Accepted without change: the `409` TOCTOU in `run-test` (harmless, semantics are
 
 ### Not done
 - **Codex review skipped**: usage limit hit, resets 20 Aug 2026. Kimi reviewed instead and found 4 high-severity defects that self-review had missed. Codex still worth running when credits return.
-- Cron cutover DONE by a different route: `crontab` writes are blocked from an automation shell (the cron spool needs Full Disk Access, and `TMPDIR=/tmp` does not help), so `/Users/macmini/scripts/speedtest_monitor.sh` was rewritten as a thin wrapper that `exec`s `speedlog-collect`. The untouched `0 * * * *` line now runs the new code, sleeping 420s to land at `:07`.
+- Cron cutover DONE by a different route: `crontab` writes are blocked from an automation shell (the cron spool needs Full Disk Access, and `TMPDIR=/tmp` does not help), so `~/scripts/speedtest_monitor.sh` was rewritten as a thin wrapper that `exec`s `speedlog-collect`. The untouched `0 * * * *` line now runs the new code, sleeping 420s to land at `:07`.
 - `com.speedlog.dashboard` LaunchAgent still not loaded; dashboard currently running from a manual `nohup`.
 
 ## 2026-04-11
-- Added `POST /api/run-test` endpoint in `src/speedlog/app.py` — subprocesses `bin/speedlog-collect`, asyncio lock, 120s timeout, returns parsed last CSV row.
+- Added `POST /api/run-test` endpoint in `src/speedlog/app.py`: subprocesses `bin/speedlog-collect`, asyncio lock, 120s timeout, returns parsed last CSV row.
 - Added `RUN TEST` button in `src/speedlog/static/index.html` header (HTML + CSS + JS handler). Calls `/api/run-test`, refreshes dashboard on success, handles 409 (in-progress) and failures.
 - Added 5 pytest tests in `tests/test_app.py`: success, failure, timeout, concurrent-409, script-not-found. All 18 tests pass.
-- Switched live launchd service from `/Users/macmini/projects/speedtest-dashboard/app.py` to canonical speedlog package via `~/Library/LaunchAgents/com.speedlog.dashboard.plist`. New env: `SPEEDLOG_DATA_DIR=/Users/macmini/logs`, `SPEEDLOG_HOST=0.0.0.0`, `SPEEDLOG_PORT=8050`, `SPEEDLOG_ROOT_PATH=/speedtest`, `SPEEDTEST_BIN=/opt/homebrew/bin/speedtest`, PATH includes `/opt/homebrew/bin` for jq.
+- Switched live launchd service from `~/projects/speedtest-dashboard/app.py` to canonical speedlog package via `~/Library/LaunchAgents/com.speedlog.dashboard.plist`. New env: `SPEEDLOG_DATA_DIR=~/logs`, `SPEEDLOG_HOST=0.0.0.0`, `SPEEDLOG_PORT=8050`, `SPEEDLOG_ROOT_PATH=/speedtest`, `SPEEDTEST_BIN=/opt/homebrew/bin/speedtest`, PATH includes `/opt/homebrew/bin` for jq.
 - Symlinked `bin/speedlog-collect` into `.venv/bin/` so `shutil.which` finds it.
-- End-to-end verified: real speedtest ran via `curl -X POST http://127.0.0.1:8050/api/run-test`, row landed in `/Users/macmini/logs/speedtest_log.csv`.
+- End-to-end verified: real speedtest ran via `curl -X POST http://127.0.0.1:8050/api/run-test`, row landed in `~/logs/speedtest_log.csv`.
 
 ## Backlog
-- `pyproject.toml` does not ship `bin/speedlog-collect` as a console script — the symlink workaround works for editable installs but breaks for `pip install speedlog` from PyPI. Either bundle as data file + entry point, or document install.sh as the only supported install path.
-- Old `/Users/macmini/projects/speedtest-dashboard/` fork is now unused — can be deleted after a few days of stable speedlog operation.
-- `_run_test_lock` only protects in-process; cron collector at `/Users/macmini/scripts/speedtest_monitor.sh` could collide on simultaneous CSV writes. Low risk; mitigate with file lock if it surfaces.
+- `pyproject.toml` does not ship `bin/speedlog-collect` as a console script. The symlink workaround works for editable installs but breaks for `pip install speedlog` from PyPI. Either bundle as data file + entry point, or document install.sh as the only supported install path.
+- Old `~/projects/speedtest-dashboard/` fork is now unused and can be deleted after a few days of stable speedlog operation.
+- `_run_test_lock` only protects in-process; cron collector at `~/scripts/speedtest_monitor.sh` could collide on simultaneous CSV writes. Low risk; mitigate with file lock if it surfaces.
+- Found during the 27 Sep 2026 README pass, not fixed (out of scope):
+  - `contrib/speedlog-dashboard.service` uses `WorkingDirectory=%h/speedlog`, but `install.sh` clones to `~/.local/share/speedlog/repo`.
+  - `docs/c4model.md` has no component for `POST /api/run-test`.
+  - `index.html` writes server names into `innerHTML` unescaped.
+  - Starlette warns that using `httpx` with `TestClient` is deprecated (`httpx2`).
+  - Stats in `docs/index.md` (136-day sample, 12.5%, 39.2%, 389, 2,719 samples, 307.62/321.04 Mbit, 175 hours, six weeks) come from the owner's own CSV, which is not in the repo.

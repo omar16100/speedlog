@@ -2,12 +2,13 @@
 
 ## Overview
 
-Speedlog is a minimal internet speed monitoring tool. It consists of two components:
+Speedlog is a minimal internet speed monitoring tool. It consists of three components:
 
-1. **speedlog-collect** — a bash script that runs a speed test (via Ookla CLI) and appends results to a CSV file
-2. **speedlog-dashboard** — a FastAPI web server that reads the CSV and renders an interactive Chart.js dashboard
+1. **speedlog-collect**: a bash script that runs a speed test (via Ookla CLI) and appends results to a CSV file
+2. **speedlog-dashboard**: a FastAPI web server that reads the CSV and renders an interactive Chart.js dashboard
+3. **speedlog-heartbeat**: a bash script that alerts when the newest CSV row goes stale (see [Heartbeat](#heartbeat))
 
-No database, no Docker, no complex setup.
+No database, no Docker.
 
 ## Architecture
 
@@ -28,7 +29,7 @@ See [c4model.md](c4model.md) for detailed architecture diagrams.
 
 ### Prerequisites
 
-- [Ookla Speedtest CLI](https://www.speedtest.net/apps/cli) (`brew install speedtest` on macOS)
+- [Ookla Speedtest CLI](https://www.speedtest.net/apps/cli) (`brew install teamookla/speedtest/speedtest` on macOS)
 - [jq](https://jqlang.github.io/jq/) (`brew install jq` on macOS, `apt install jq` on Linux)
 - [uv](https://docs.astral.sh/uv/) (for the dashboard)
 
@@ -161,6 +162,9 @@ silence its own alarm:
 23 */3 * * * SPEEDLOG_ALERT_CMD="..." ~/.local/bin/speedlog-heartbeat
 ```
 
+`install.sh` only copies `speedlog-collect`, so copy the heartbeat yourself
+first: `cp ~/.local/share/speedlog/repo/bin/speedlog-heartbeat ~/.local/bin/`.
+
 `SPEEDLOG_ALERT_CMD` receives the message on stdin. Anything that reads stdin
 works, for example a Telegram or ntfy sender. Leave it unset to report to
 stderr only, which cron will mail.
@@ -220,3 +224,9 @@ cp /path/to/old/speedtest_log.csv ~/.local/share/speedlog/speedtest_log.csv
 The dashboard handles 4-column (original), 6-column (with ISP and server) and 8-column (with status and server id) formats automatically, including a file that mixes all three.
 
 If your existing header does not match the current 8-column schema, the collector warns rather than rewriting it: the header is your data, not the tool's. Fix it by hand when convenient.
+
+## Plans
+
+| Date | Document | Status |
+|---|---|---|
+| 27 Sep 2026 | [README accuracy and CI](27092026_readme_accuracy_ci_plan.md) | Done |

@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv stopped publishing floating major tags after v7, so pin the
+      # full release tag.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          # requires-python floor in pyproject.toml
+          python-version: "3.12"
+
+      # uv.lock is gitignored, so this resolves the newest versions allowed by
+      # pyproject.toml. The tests monkeypatch subprocess.run and never run a
+      # real speed test or touch the network.
+      - name: Run tests
+        run: uv run pytest -v
